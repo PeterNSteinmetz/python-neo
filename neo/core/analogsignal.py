@@ -15,6 +15,7 @@ This is where user-specified attributes are set.
 * :meth:`__array_finalize__` is called for all new objects, including those
 created by slicing. This is where attributes are copied over from
 the old object.
+
 """
 
 import logging
@@ -200,7 +201,10 @@ class AnalogSignal(BaseSignal):
         """
         if copy is not None:
             raise ValueError(
-                "`copy` is now deprecated in Neo due to removal in NumPy 2.0 and will be removed in 0.15.0."
+                "`copy` is now deprecated in Neo due to removal in Quantites to support Numpy 2.0. "
+                "In order to facilitate the deprecation copy can be set to None but will raise an "
+                "error if set to True/False since this will silently do nothing. This argument will be completely "
+                "removed in Neo 0.15.0. Please update your code base as necessary."
             )
 
         signal = cls._rescale(signal, units=units)
@@ -210,7 +214,7 @@ class AnalogSignal(BaseSignal):
             obj.shape = (-1, 1)
 
         if t_start is None:
-            raise ValueError("t_start cannot be None")
+            raise ValueError("`t_start` cannot be None")
         obj._t_start = t_start
 
         obj._sampling_rate = _get_sampling_rate(sampling_rate, sampling_period)
@@ -520,10 +524,8 @@ class AnalogSignal(BaseSignal):
             j = i + int(np.rint(delta.simplified.magnitude))
 
         if (i < 0) or (j > len(self)):
-            raise ValueError(
-                "t_start, t_stop have to be within the analog \
-                              signal duration"
-            )
+            raise ValueError("t_start, t_stop have to be within the analog \
+                              signal duration")
 
         # Time slicing should create a deep copy of the object
         obj = deepcopy(self[i:j])

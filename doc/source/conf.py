@@ -60,7 +60,7 @@ master_doc = "index"
 
 # General information about the project.
 project = "Neo"
-copyright = "2010-2024, " + AUTHORS
+copyright = "2010-2025, " + AUTHORS
 
 # The version info for the project you're documenting, acts as replacement for
 # |version| and |release|, also used in various other places throughout the
@@ -247,9 +247,7 @@ todo_include_todos = True  # set to False before releasing documentation
 
 rst_epilog = """
 .. |neo_github_url| replace:: https://github.com/NeuralEnsemble/python-neo/archive/neo-{}.zip
-""".format(
-    neo_release
-)
+""".format(neo_release)
 
 sphinx_gallery_conf = {
     # 'only_warn_on_example_error': True, # helps with debugging broken examples

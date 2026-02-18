@@ -1,5 +1,3 @@
-import datetime
-import dateutil
 from packaging.version import Version
 import os
 import re
@@ -57,7 +55,13 @@ class NlxHeader(OrderedDict):
         ("DspHighCutNumTaps", "", None),
         ("DspHighCutFilterType", "", None),
         ("DspDelayCompensation", "", None),
-        ("DspFilterDelay_µs", "", None),
+        # DspFilterDelay key with flexible µ symbol matching
+        # Different Neuralynx versions encode the µ (micro) symbol differently:
+        # - Some files use single-byte encoding (latin-1): DspFilterDelay_µs (raw bytes: \xb5)
+        # - Other files use UTF-8 encoding: DspFilterDelay_µs (raw bytes: \xc2\xb5)
+        # When UTF-8 encoded µ (\xc2\xb5) is decoded with latin-1, it becomes "Âµ"
+        # This regex matches both variants: "µs" and "Âµs" but normalizes to "DspFilterDelay_µs"
+        (r"DspFilterDelay_[Â]?µs", "DspFilterDelay_µs", None),
         ("DisabledSubChannels", "", None),
         ("WaveformLength", "", int),
         ("AlignmentPt", "", None),
@@ -86,12 +90,17 @@ class NlxHeader(OrderedDict):
     #
     # There are now separate patterns for the in header line and in properties cases which cover
     # the known variations in each case. They are compiled here once for efficiency.
-    openDatetime1_pat = re.compile(r"## (Time|Date) Opened:* \((m/d/y|mm/dd/yyy)\): (?P<date>\S+)"\
-                                      r"\s+(\(h:m:s\.ms\)|At Time:) (?P<time>\S+)")
-    openDatetime2_pat = re.compile(r"-TimeCreated (?P<date>\S+) (?P<time>\S+)")
-    closeDatetime1_pat = re.compile(r"## (Time|Date) Closed:* \((m/d/y|mm/dd/yyy)\): " \
-                                        r"(?P<date>\S+)\s+(\(h:m:s\.ms\)|At Time:) (?P<time>\S+)")
-    closeDatetime2_pat = re.compile(r"-TimeClosed (?P<date>\S+) (?P<time>\S+)")
+    _openDatetime1_pat = re.compile(
+        r"## (Time|Date) Opened:* \((m/d/y|mm/dd/yyy)\): (?P<date>\S+)" r"\s+(\(h:m:s\.ms\)|At Time:) (?P<time>\S+)"
+    )
+    _openDatetime2_pat = re.compile(r"-TimeCreated (?P<date>\S+) (?P<time>\S+)")
+    _closeDatetime1_pat = re.compile(
+        r"## (Time|Date) Closed:* \((m/d/y|mm/dd/yyy)\): " r"(?P<date>\S+)\s+(\(h:m:s\.ms\)|At Time:) (?P<time>\S+)"
+    )
+    _closeDatetime2_pat = re.compile(r"-TimeClosed (?P<date>\S+) (?P<time>\S+)")
+
+    # Precompiled filename pattern
+    _filename_pat = re.compile(r"## File Name:* (?P<filename>.*)")
 
     # BML - example
     # ######## Neuralynx Data File Header
@@ -165,10 +174,6 @@ class NlxHeader(OrderedDict):
     # -TimeCreated 2019/06/28 17:36:50
     # -TimeClosed 2019/06/28 17:45:48
 
-    # regular expressions to match filename
-    filename_regex = [r"## File Name (?P<filename>\S+)",
-                      r'-OriginalFileName "?(?P<filename>\S+)"?']
-
     def __init__(self, filename, props_only=False):
         """
         Factory function to build NlxHeader for a given file.
@@ -177,25 +182,37 @@ class NlxHeader(OrderedDict):
         :param props_only: if true, will not try and read time and date or check start
         """
         super(OrderedDict, self).__init__()
-        with open(filename, "rb") as f:
-            txt_header = f.read(NlxHeader.HEADER_SIZE)
-        txt_header = txt_header.strip(b"\x00").decode("latin-1")
+
+        txt_header = NlxHeader.get_text_header(filename)
 
         # must start with 8 # characters
         if not props_only and not txt_header.startswith("########"):
             ValueError("Neuralynx files must start with 8 # characters.")
 
-        self.read_properties(filename, txt_header)
-        numChidEntries = self.convert_channel_ids_names(filename)
-        self.setApplicationAndVersion()
-        self.setBitToMicroVolt()
-        self.setInputRanges(numChidEntries)
-        # :TODO: needs to also handle filename property
+        self._readProperties(filename, txt_header)
+        self._setApplicationAndVersion()
+        numChidEntries = self._convertChannelIdsNames(filename)
+        self._setBitToMicroVolt()
+        self._setInputRanges(numChidEntries)
+        self._setFilenameProp(txt_header)
 
         if not props_only:
-            self.readTimeDate(txt_header)
+            self._setTimeDate(txt_header)
 
-    def read_properties(self, filename, txt_header):
+        # Normalize all types to proper Python types
+        self._normalize_types()
+
+    @staticmethod
+    def get_text_header(filename):
+        """
+        Accessory method to extract text in header. Useful for subclasses.
+        :param filename: name of Neuralynx file
+        """
+        with open(filename, "rb") as f:
+            txt_header = f.read(NlxHeader.HEADER_SIZE)
+        return txt_header.strip(b"\x00").decode("latin-1")
+
+    def _readProperties(self, filename, txt_header):
         """
         Read properties from header and place in OrderedDictionary which this object is.
         :param filename: name of ncs file, used for extracting channel number
@@ -215,27 +232,7 @@ class NlxHeader(OrderedDict):
                     value = type_(value)
                 self[name] = value
 
-    def setInputRanges(self, numChidEntries):
-        if "InputRange" in self:
-            ir_entries = re.findall(r"\w+", self["InputRange"])
-            if len(ir_entries) == 1:
-                self["InputRange"] = [int(ir_entries[0])] * numChidEntries
-            else:
-                self["InputRange"] = [int(e) for e in ir_entries]
-            assert len(self["InputRange"]) == numChidEntries, \
-                "Number of channel ids does not match input range values."
-
-    def setBitToMicroVolt(self):
-        # convert bit_to_microvolt
-        if "bit_to_microVolt" in self:
-            btm_entries = re.findall(r"\S+", self["bit_to_microVolt"])
-            if len(btm_entries) == 1:
-                btm_entries = btm_entries * len(self["channel_ids"])
-            self["bit_to_microVolt"] = [float(e) * 1e6 for e in btm_entries]
-            assert len(self["bit_to_microVolt"]) == len( self["channel_ids"]), \
-                "Number of channel ids does not match bit_to_microVolt conversion factors."
-
-    def setApplicationAndVersion(self):
+    def _setApplicationAndVersion(self):
         """
         Set "ApplicationName" property and app_version attribute based on existing properties
         """
@@ -264,7 +261,7 @@ class NlxHeader(OrderedDict):
 
         self["ApplicationVersion"] = Version(app_version)
 
-    def convert_channel_ids_names(self, filename):
+    def _convertChannelIdsNames(self, filename):
         """
         Convert channel ids and channel name properties, if present.
 
@@ -294,29 +291,130 @@ class NlxHeader(OrderedDict):
 
         return len(chid_entries)
 
-    def readTimeDate(self, txt_header):
+    def _setBitToMicroVolt(self):
+        # convert bit_to_microvolt
+        if "bit_to_microVolt" in self:
+            btm_entries = re.findall(r"\S+", self["bit_to_microVolt"])
+            if len(btm_entries) == 1:
+                btm_entries = btm_entries * len(self["channel_ids"])
+            self["bit_to_microVolt"] = [float(e) * 1e6 for e in btm_entries]
+            assert len(self["bit_to_microVolt"]) == len(
+                self["channel_ids"]
+            ), "Number of channel ids does not match bit_to_microVolt conversion factors."
+
+    def _setInputRanges(self, numChidEntries):
+        if "InputRange" in self:
+            ir_entries = re.findall(r"\w+", self["InputRange"])
+            if len(ir_entries) == 1:
+                self["InputRange"] = [int(ir_entries[0])] * numChidEntries
+            else:
+                self["InputRange"] = [int(e) for e in ir_entries]
+            assert len(self["InputRange"]) == numChidEntries, "Number of channel ids does not match input range values."
+
+    def _setFilenameProp(self, txt_header):
+        """
+        Add an OriginalFileName property if in header.
+        """
+        if not "OriginalFileName" in self.keys():
+            fnm = NlxHeader._filename_pat.search(txt_header)
+            if not fnm:
+                return
+            else:
+                self["OriginalFileName"] = fnm.group(1).strip(' "\t\r\n')
+        else:
+            # some file types quote the property so strip that also
+            self["OriginalFileName"] = self["OriginalFileName"].strip(' "\t\r\n')
+
+    def _setTimeDate(self, txt_header):
         """
         Read time and date from text of header
         """
+        import dateutil
 
         # opening time
-        sr = NlxHeader.openDatetime1_pat.search(txt_header)
-        if not sr: sr=NlxHeader.openDatetime2_pat.search(txt_header)
+        sr = NlxHeader._openDatetime1_pat.search(txt_header)
+        if not sr:
+            sr = NlxHeader._openDatetime2_pat.search(txt_header)
         if not sr:
             raise IOError(
-                f"No matching header open date/time for application {self['ApplicationName']} " +
-                f"version {self['ApplicationVersion']}. Please contact developers."
+                f"No matching header open date/time for application {self['ApplicationName']} "
+                + f"version {self['ApplicationVersion']}. Please contact developers."
             )
         else:
             dt1 = sr.groupdict()
-            self['recording_opened'] = dateutil.parser.parse(f"{dt1['date']} {dt1['time']}")
+            self["recording_opened"] = dateutil.parser.parse(f"{dt1['date']} {dt1['time']}")
 
         # close time, if available
-        sr = NlxHeader.closeDatetime1_pat.search(txt_header)
-        if not sr: sr=NlxHeader.closeDatetime2_pat.search(txt_header)
+        sr = NlxHeader._closeDatetime1_pat.search(txt_header)
+        if not sr:
+            sr = NlxHeader._closeDatetime2_pat.search(txt_header)
         if sr:
             dt2 = sr.groupdict()
-            self['recording_closed'] = dateutil.parser.parse(f"{dt2['date']} {dt2['time']}")
+            self["recording_closed"] = dateutil.parser.parse(f"{dt2['date']} {dt2['time']}")
+
+    def _normalize_types(self):
+        """
+        Convert all header values to proper Python types.
+
+        This ensures that:
+        - Boolean strings ('True', 'False', 'Enabled', 'Disabled') become Python bools
+        - Numeric strings ('0.1', '8000') become Python floats/ints
+        - Single-element lists are extracted to scalars (for single-channel files)
+
+        This normalization makes the header values directly usable for
+        stream identification without additional conversion in NeuralynxRawIO.
+        """
+
+        # Convert boolean strings to actual booleans
+        bool_keys = [
+            "DSPLowCutFilterEnabled",
+            "DSPHighCutFilterEnabled",
+            "DspDelayCompensation",
+        ]
+
+        for key in bool_keys:
+            if key in self and isinstance(self[key], str):
+                if self[key] in ("True", "Enabled"):
+                    self[key] = True
+                elif self[key] in ("False", "Disabled"):
+                    self[key] = False
+
+        # Convert numeric strings to numbers
+        numeric_keys = [
+            "DspLowCutFrequency",
+            "DspHighCutFrequency",
+            "DspLowCutNumTaps",
+            "DspHighCutNumTaps",
+        ]
+
+        for key in numeric_keys:
+            if key in self and isinstance(self[key], str):
+                try:
+                    # Try int first
+                    if "." not in self[key]:
+                        self[key] = int(self[key])
+                    else:
+                        self[key] = float(self[key])
+                except ValueError:
+                    # Keep as string if conversion fails
+                    pass
+
+        # Handle DspFilterDelay_µs (could be string or already converted)
+        delay_key = "DspFilterDelay_µs"
+        if delay_key in self and isinstance(self[delay_key], str):
+            try:
+                self[delay_key] = int(self[delay_key])
+            except ValueError:
+                pass
+
+        # Extract single-channel InputRange from list
+        # For multi-channel files, keep as list
+        # For single-channel files, extract the single value
+        if "InputRange" in self and isinstance(self["InputRange"], list):
+            if len(self["InputRange"]) == 1:
+                # Single channel file: extract the value
+                self["InputRange"] = self["InputRange"][0]
+            # else: multi-channel, keep as list
 
     def type_of_recording(self):
         """

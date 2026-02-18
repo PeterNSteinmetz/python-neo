@@ -33,6 +33,7 @@ class TestNeuralynxRawIO(
         "neuralynx/Cheetah_v5.6.3/original_data",
         "neuralynx/Cheetah_v5.7.4/original_data",
         "neuralynx/Cheetah_v6.3.2/incomplete_blocks",
+        "neuralynx/two_streams_different_header_encoding",
     ]
 
     def test_scan_ncs_files(self):
@@ -202,6 +203,7 @@ class TestNeuralynxRawIO(
         ts = rawio.get_spike_timestamps(0,0,0)
         self.assertEqual(26122760712, ts[0])
 
+
         # After rescaling, the spike timestamps are in seconds relative to global_t_start, as
         # per BaseRawIO.
         rts = rawio.rescale_spike_timestamp(ts)
@@ -246,11 +248,137 @@ class TestNeuralynxRawIO(
         rts = rawio.rescale_spike_timestamp(ts[0])
         self.assertAlmostEqual(26122558117/1e6, rts[0], places=6)
 
+    def test_directory_in_data_folder(self):
+        """
+        Test that directories inside the data folder are properly ignored
+        and don't cause errors during parsing.
+        """
+        import tempfile
+        import shutil
+
+        # Use existing test data directory
+        dname = self.get_local_path("neuralynx/Cheetah_v5.6.3/original_data/")
+
+        # Create a temporary copy to avoid modifying test data
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_data_dir = os.path.join(temp_dir, "test_data")
+            shutil.copytree(dname, temp_data_dir)
+
+            # Create a subdirectory inside the test data
+            test_subdir = os.path.join(temp_data_dir, "raw fscv data with all recorded ch")
+            os.makedirs(test_subdir, exist_ok=True)
+
+            # Create some files in the subdirectory to make it more realistic
+            with open(os.path.join(test_subdir, "some_file.txt"), "w") as f:
+                f.write("test file content")
+
+            # This should not raise an error despite the directory presence
+            rawio = NeuralynxRawIO(dirname=temp_data_dir)
+            rawio.parse_header()
+
+            # Verify that the reader still works correctly
+            self.assertEqual(rawio._nb_segment, 2)
+            self.assertEqual(len(rawio.ncs_filenames), 2)
+            self.assertEqual(len(rawio.nev_filenames), 1)
+            sigHdrs = rawio.header["signal_channels"]
+            self.assertEqual(sigHdrs.size, 2)
+            self.assertEqual(len(rawio.header["spike_channels"]), 8)
+            self.assertEqual(len(rawio.header["event_channels"]), 2)
+
+
+def test_two_streams_different_header_encoding(self):
+    """
+    Test that streams are correctly differentiated based on filter parameters.
+    This dataset contains eye-tracking and ephys channels with different filter settings.
+    """
+    from pathlib import Path
+
+    # Get the path using the same machinery as other tests
+    dname = self.get_local_path("neuralynx/two_streams_different_header_encoding")
+
+    # Test with Path object (as shown in user's notebook)
+    rawio = NeuralynxRawIO(dirname=Path(dname))
+    rawio.parse_header()
+
+    # Should have 2 streams due to different filter configurations
+    self.assertEqual(rawio.signal_streams_count(), 2)
+
+    # Check stream names follow the new naming convention
+    stream_names = [rawio.header["signal_streams"][i][0] for i in range(rawio.signal_streams_count())]
+
+    # Stream names should include sampling rate (Hz), voltage range (mV), and DSP filter ID
+    for stream_name in stream_names:
+        self.assertRegex(stream_name, r"stream\d+_\d+Hz_\d+mVRange_DSPFilter\d+")
+
+    # Verify we have the expected streams:
+    # - Eye-tracking channels (CSC145, CSC146): 32000Hz, 100mV range, low-cut disabled
+    # - Ephys channel (CSC76): 32000Hz, 1mV range, low-cut enabled
+    expected_names = {"stream0_32000Hz_100mVRange_DSPFilter0", "stream1_32000Hz_1mVRange_DSPFilter1"}
+    self.assertEqual(set(stream_names), expected_names)
+
+    # Verify DSP filter configurations are stored (private for now)
+    self.assertTrue(hasattr(rawio, "_dsp_filter_configurations"))
+    self.assertEqual(len(rawio._dsp_filter_configurations), 2)
+
+    # Verify filter 0 (eye-tracking): low-cut disabled
+    filter_0 = rawio._dsp_filter_configurations[0]
+    self.assertFalse(filter_0.get("DSPLowCutFilterEnabled", True))
+
+    # Verify filter 1 (ephys): low-cut enabled
+    filter_1 = rawio._dsp_filter_configurations[1]
+    self.assertTrue(filter_1.get("DSPLowCutFilterEnabled", False))
+
+
+class TestNcsRecordingType(BaseTestRawIO, unittest.TestCase):
+
+    def test_two_streams_different_header_encoding(self):
+        """
+        Test that streams are correctly differentiated based on filter parameters.
+        This dataset contains eye-tracking and ephys channels with different filter settings.
+        """
+        from pathlib import Path
+
+        # Get the path using the same machinery as other tests
+        dname = self.get_local_path("neuralynx/two_streams_different_header_encoding")
+
+        # Test with Path object (as shown in user's notebook)
+        rawio = NeuralynxRawIO(dirname=Path(dname))
+        rawio.parse_header()
+
+        # Should have 2 streams due to different filter configurations
+        self.assertEqual(rawio.signal_streams_count(), 2)
+
+        # Check stream names follow the new naming convention
+        stream_names = [rawio.header["signal_streams"][i][0] for i in range(rawio.signal_streams_count())]
+
+        # Stream names should include sampling rate (Hz), voltage range (mV), and DSP filter ID
+        for stream_name in stream_names:
+            self.assertRegex(stream_name, r"stream\d+_\d+Hz_\d+mVRange_DSPFilter\d+")
+
+        # Verify we have the expected streams:
+        # - Eye-tracking channels (CSC145, CSC146): 32000Hz, 100mV range, low-cut disabled
+        # - Ephys channel (CSC76): 32000Hz, 1mV range, low-cut enabled
+        expected_names = {"stream0_32000Hz_100mVRange_DSPFilter0", "stream1_32000Hz_1mVRange_DSPFilter1"}
+        self.assertEqual(set(stream_names), expected_names)
+
+        # Verify DSP filter configurations are stored (private for now)
+        self.assertTrue(hasattr(rawio, "_dsp_filter_configurations"))
+        self.assertEqual(len(rawio._dsp_filter_configurations), 2)
+
+        # Verify filter 0 (eye-tracking): low-cut disabled
+        filter_0 = rawio._dsp_filter_configurations[0]
+        self.assertFalse(filter_0.get("DSPLowCutFilterEnabled", True))
+
+        # Verify filter 1 (ephys): low-cut enabled
+        filter_1 = rawio._dsp_filter_configurations[1]
+        self.assertTrue(filter_1.get("DSPLowCutFilterEnabled", False))
+
 
 class TestNcsRecordingType(BaseTestRawIO, unittest.TestCase):
     """
     Test of decoding of NlxHeader for type of recording.
     """
+
     rawioclass = NeuralynxRawIO
     entities_to_test = []
 
@@ -269,7 +397,6 @@ class TestNcsRecordingType(BaseTestRawIO, unittest.TestCase):
     def test_recording_types(self):
 
         for typeTest in self.ncsTypeTestFiles:
-
             filename = self.get_local_path(typeTest[0])
             hdr = NlxHeader(filename)
             self.assertEqual(hdr.type_of_recording(), typeTest[1])
@@ -279,6 +406,7 @@ class TestNcsSectionsFactory(BaseTestRawIO, unittest.TestCase):
     """
     Test building NcsBlocks for files of different revisions.
     """
+
     rawioclass = NeuralynxRawIO
     entities_to_test = []
 
@@ -400,6 +528,7 @@ class TestNcsSections(BaseTestRawIO, unittest.TestCase):
     """
     Test building NcsBlocks for files of different revisions.
     """
+
     rawioclass = NeuralynxRawIO
     entities_to_test = []
 
@@ -444,16 +573,16 @@ class TestNlxHeader(BaseTestRawIO, unittest.TestCase):
 
         hdr = NlxHeader(filename, props_only=True)
 
-        self.assertEqual(len(hdr), 11) # 9 properties plus channel_ids and channel_names
-        self.assertEqual(hdr['ApplicationName'], 'Pegasus')
-        self.assertEqual(hdr['FileType'], 'Event')
+        self.assertEqual(len(hdr), 11)  # 9 properties plus channel_ids and channel_names
+        self.assertEqual(hdr["ApplicationName"], "Pegasus")
+        self.assertEqual(hdr["FileType"], "Event")
 
     def test_neuraview2(self):
         filename = self.get_local_path("neuralynx/Neuraview_v2/original_data/NeuraviewEventMarkers-sample.nev")
         hdr = NlxHeader(filename)
 
-        self.assertEqual(datetime.datetime(2015,12,14, 15,58,32), hdr['recording_opened'])
-        self.assertEqual(datetime.datetime(2015,12,14, 15,58,32), hdr['recording_closed'])
+        self.assertEqual(datetime.datetime(2015, 12, 14, 15, 58, 32), hdr["recording_opened"])
+        self.assertEqual(datetime.datetime(2015, 12, 14, 15, 58, 32), hdr["recording_closed"])
 
     # left in for possible future header tests
     def get_text_header(self, filename):
@@ -463,6 +592,8 @@ class TestNlxHeader(BaseTestRawIO, unittest.TestCase):
 
     # left in for possible future header tests
     def check_dateutil_parse(self, hdrTxt, openPat, closePat, openDate, closeDate):
+        import dateutil
+
         mtch = openPat.search(hdrTxt)
         self.assertIsNotNone(mtch)
         dt = mtch.groupdict()
@@ -476,62 +607,82 @@ class TestNlxHeader(BaseTestRawIO, unittest.TestCase):
             self.assertEqual(closeDate, date)
 
     def test_datetime_parsing(self):
-
         # neuraview2
         filename = self.get_local_path("neuralynx/Neuraview_v2/original_data/NeuraviewEventMarkers-sample.nev")
-        txt_header = self.get_text_header(filename)
-        self.check_dateutil_parse(txt_header, NlxHeader.openDatetime1_pat, NlxHeader.closeDatetime1_pat,
-                                  datetime.datetime(2015,12,14, 15,58,32),
-                                  datetime.datetime(2015,12,14, 15,58,32))
+        txt_header = NlxHeader.get_text_header(filename)
+        self.check_dateutil_parse(
+            txt_header,
+            NlxHeader._openDatetime1_pat,
+            NlxHeader._closeDatetime1_pat,
+            datetime.datetime(2015, 12, 14, 15, 58, 32),
+            datetime.datetime(2015, 12, 14, 15, 58, 32),
+        )
         hdr = NlxHeader(filename)
-        self.assertEqual(datetime.datetime(2015,12,14, 15,58,32),
-                          hdr['recording_opened'])
-        self.assertEqual(datetime.datetime(2015,12,14, 15,58,32),
-                          hdr['recording_closed'])
+        self.assertEqual(datetime.datetime(2015, 12, 14, 15, 58, 32), hdr["recording_opened"])
+        self.assertEqual(datetime.datetime(2015, 12, 14, 15, 58, 32), hdr["recording_closed"])
 
         # Cheetah 5.7.4 'inProps'
         filename = self.get_local_path("neuralynx/Cheetah_v5.7.4/original_data/CSC1.ncs")
-        txt_header = self.get_text_header(filename)
-        self.check_dateutil_parse(txt_header, NlxHeader.openDatetime2_pat, NlxHeader.closeDatetime2_pat,
-                                  datetime.datetime(2017,2,16, 17,56,4),
-                                  datetime.datetime(2017,2,16, 18,1,18))
+        txt_header = NlxHeader.get_text_header(filename)
+        self.check_dateutil_parse(
+            txt_header,
+            NlxHeader._openDatetime2_pat,
+            NlxHeader._closeDatetime2_pat,
+            datetime.datetime(2017, 2, 16, 17, 56, 4),
+            datetime.datetime(2017, 2, 16, 18, 1, 18),
+        )
         hdr = NlxHeader(filename)
-        self.assertEqual(datetime.datetime(2017,2,16, 17,56,4),
-                          hdr['recording_opened'])
-        self.assertEqual(datetime.datetime(2017,2,16, 18,1,18),
-                         hdr['recording_closed'])
+        self.assertEqual(datetime.datetime(2017, 2, 16, 17, 56, 4), hdr["recording_opened"])
+        self.assertEqual(datetime.datetime(2017, 2, 16, 18, 1, 18), hdr["recording_closed"])
 
         # Cheetah 4.0.2
         filename = self.get_local_path("neuralynx/Cheetah_v4.0.2/original_data/CSC14_trunc.Ncs")
-        txt_header = self.get_text_header(filename)
-        self.check_dateutil_parse(txt_header, NlxHeader.openDatetime1_pat, None,
-                                  datetime.datetime(2003,10,4, 10,3,0, 578000),
-                                  None)
+        txt_header = NlxHeader.get_text_header(filename)
+        self.check_dateutil_parse(
+            txt_header, NlxHeader._openDatetime1_pat, None, datetime.datetime(2003, 10, 4, 10, 3, 0, 578000), None
+        )
         hdr = NlxHeader(filename)
-        self.assertEqual(datetime.datetime(2003,10,4, 10,3,0, 578000),
-                         hdr['recording_opened'])
-        self.assertIsNone(hdr.get('recording_closed'))
+        self.assertEqual(datetime.datetime(2003, 10, 4, 10, 3, 0, 578000), hdr["recording_opened"])
+        self.assertIsNone(hdr.get("recording_closed"))
 
         # Cheetah 5.4.0 'openClosedInHeader'
         filename = self.get_local_path("neuralynx/Cheetah_v5.4.0/original_data/CSC5_trunc.Ncs")
-        txt_header = self.get_text_header(filename)
-        self.check_dateutil_parse(txt_header, NlxHeader.openDatetime1_pat, NlxHeader.closeDatetime1_pat,
-                                  datetime.datetime(2001,1,1, 0,0,0, 0),
-                                  datetime.datetime(2001,1,1, 0,0,0, 0))
+        txt_header = NlxHeader.get_text_header(filename)
+        self.check_dateutil_parse(
+            txt_header,
+            NlxHeader._openDatetime1_pat,
+            NlxHeader._closeDatetime1_pat,
+            datetime.datetime(2001, 1, 1, 0, 0, 0, 0),
+            datetime.datetime(2001, 1, 1, 0, 0, 0, 0),
+        )
         hdr = NlxHeader(filename)
-        self.assertEqual(datetime.datetime(2001,1,1, 0,0,0, 0),
-                         hdr['recording_opened'])
-        self.assertEqual(datetime.datetime(2001,1,1, 0,0,0, 0),
-                         hdr['recording_closed'])
+        self.assertEqual(datetime.datetime(2001, 1, 1, 0, 0, 0, 0), hdr["recording_opened"])
+        self.assertEqual(datetime.datetime(2001, 1, 1, 0, 0, 0, 0), hdr["recording_closed"])
+
+    def test_filename_prop(self):
+        # neuraview2
+        filename = self.get_local_path("neuralynx/Neuraview_v2/original_data/NeuraviewEventMarkers-sample.nev")
+        hdr = NlxHeader(filename)
+        self.assertEqual(
+            r"L:\McHugh Lab\Recording\2015-06-24_18-05-11\NeuraviewEventMarkers-20151214_SleepScore.nev",
+            hdr["OriginalFileName"],
+        )
+
+        # Cheetah 5.7.4 'inProps'
+        filename = self.get_local_path("neuralynx/Cheetah_v5.7.4/original_data/CSC1.ncs")
+        hdr = NlxHeader(filename)
+        self.assertEqual(r"C:\CheetahData\2017-02-16_17-55-55\CSC1.ncs", hdr["OriginalFileName"])
+
+        # Cheetah 4.0.2
+        filename = self.get_local_path("neuralynx/Cheetah_v4.0.2/original_data/CSC14_trunc.Ncs")
+        hdr = NlxHeader(filename)
+        self.assertEqual(r"D:\Cheetah_Data\2003-10-4_10-2-58\CSC14.Ncs", hdr["OriginalFileName"])
+
+        # Cheetah 5.4.0
+        filename = self.get_local_path("neuralynx/Cheetah_v5.4.0/original_data/CSC5_trunc.Ncs")
+        hdr = NlxHeader(filename)
+        self.assertEqual(r"C:\CheetahData\2000-01-01_00-00-00\CSC5.ncs", hdr["OriginalFileName"])
+
 
 if __name__ == "__main__":
     unittest.main()
-
-    # test = TestNeuralynxRawIO()
-    # test.test_scan_ncs_files()
-    # test.test_exclude_filenames()
-    # test.test_include_filenames()
-
-    # test = TestNcsSectionsFactory()
-    # test.test_ncsblocks_partial()
-    # test.test_build_given_actual_frequency()
